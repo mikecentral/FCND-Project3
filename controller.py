@@ -17,9 +17,43 @@ MAX_TORQUE = 1.0
 
 class NonlinearController(object):
 
-    def __init__(self):
-        """Initialize the controller object and control gains"""
-        return    
+    def __init__(self,
+                z_k_p=1.0,
+                z_k_d=1.0,
+                xy_k_p=1.0,
+                xy_k_d=1.0,
+                
+                k_p_roll=1.0,
+                k_p_pitch=1.0,
+                k_p_yaw=1.0,
+                
+                k_p_p=1.0,
+                k_p_q=1.0,
+                k_p_r=1.0,
+                
+                max_tilt=1.0,
+                max_ascent_rate=5.0,
+                max_descent_rate=2.0,
+                max_speed=5.0
+                ):
+        
+        
+        self.z_k_p = z_k_p
+        self.z_k_d = z_k_d
+        self.xy_k_p = xy_k_p
+        self.xy_k_d = xy_k_d
+        self.k_p_roll = k_p_roll
+        self.k_p_pitch = k_p_pitch
+        self.k_p_yaw = k_p_yaw
+        self.k_p_p = k_p_p
+        self.k_p_q = k_p_q
+        self.k_p_r = k_p_r
+
+        self.max_ascent_rate = max_ascent_rate
+        self.max_descent_rate = max_descent_rate
+        self.max_tilt = max_tilt
+        self.max_speed = max_speed
+
 
     def trajectory_control(self, position_trajectory, yaw_trajectory, time_trajectory, current_time):
         """Generate a commanded position, velocity and yaw based on the trajectory
@@ -81,7 +115,19 @@ class NonlinearController(object):
             
         Returns: desired vehicle 2D acceleration in the local frame [north, east]
         """
-        return np.array([0.0, 0.0])
+
+        speed = np.linalg.norm(local_velocity_cmd)  # can we use this to limit the max velocity?
+
+        pos_err = local_position_cmd - local_position
+        vel_err = local_position_cmd - local_velocity
+
+        p_term_xy = self.xy_k_p * pos_err
+        d_term_xy = self.xy_k_d * vel_err
+        
+        accel_command = p_term_xy + d_term_xy + acceleration_ff
+        
+        return accel_command
+
     
     def altitude_control(self, altitude_cmd, vertical_velocity_cmd, altitude, vertical_velocity, attitude, acceleration_ff=0.0):
         """Generate vertical acceleration (thrust) command
@@ -96,7 +142,21 @@ class NonlinearController(object):
             
         Returns: thrust command for the vehicle (+up)
         """
-        return 0.0
+
+        z_err = altitude_cmd - altitude
+        z_err_dot = vertical_velocity_cmd - vertical_velocity
+        b_z = np.cos(attitude[0]) * np.cos(attitude[1]) # This is matrix element R33
+
+        p_term = self.z_k_p * z_err
+        d_term = self.z_k_d * z_err_dot
+
+        u_1_bar = p_term + d_term + acceleration_ff  # this term is desired vertical acceleration
+
+        c = (u_1_bar - GRAVITY)/b_z  # Note that gravity is a negative number
+
+        thrust = np.clip(c * DRONE_MASS_KG, 0.0, MAX_THRUST) # Limit thrust to values between 0 and Max Thrust
+
+        return thrust
         
     
     def roll_pitch_controller(self, acceleration_cmd, attitude, thrust_cmd):
@@ -131,5 +191,22 @@ class NonlinearController(object):
         
         Returns: target yawrate in radians/sec
         """
-        return 0.0
+
+        # Since yaw is decoupled from the other directions, we only need a P controller
+
+        yaw_cmd = np.mod(yaw_cmd, 2.0*np.pi)  # constrain yaw to the range (0,2pi)
+
+        yaw_err = yaw_cmd - yaw
+
+        # We have a choice on which way to rotate the drone to get to the desired yaw angle
+        # And should pick the direction (CW or CCW) that requires the smaller rotation
+
+        if yaw_err > np.pi:
+            yaw_err = yaw_err - 2.0*np.pi
+        elif yaw_err < -np.pi:
+            yaw_err = yaw_err + 2.0*np.pi
+        
+        yaw_rate = self.k_p_yaw * yaw_err
+
+        return yaw_rate
     
