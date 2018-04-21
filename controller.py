@@ -9,7 +9,7 @@ components:
 import numpy as np
 from frame_utils import euler2RM
 
-DRONE_MASS_KG = 0.5
+DRONE_MASS_KG = .5
 GRAVITY = -9.81
 MOI = np.array([0.005, 0.005, 0.01])
 MAX_THRUST = 10.0
@@ -18,18 +18,18 @@ MAX_TORQUE = 1.0
 class NonlinearController(object):
 
     def __init__(self,
-                z_k_p=1.0,
-                z_k_d=1.0,
-                xy_k_p=1.0,
-                xy_k_d=1.0,
+                z_k_p=4,
+                z_k_d=2.7,
+                xy_k_p=5,
+                xy_k_d=3,
                 
-                k_p_roll=1.0,
-                k_p_pitch=1.0,
-                k_p_yaw=1.0,
+                k_p_roll=8,
+                k_p_pitch=8,
+                k_p_yaw=4.5,
                 
-                k_p_p=1.0,
-                k_p_q=1.0,
-                k_p_r=1.0,
+                k_p_p = 20.0,
+                k_p_q = 20.0,
+                k_p_r = 5.0,
                 
                 max_tilt=1.0,
                 max_ascent_rate=5.0,
@@ -116,17 +116,21 @@ class NonlinearController(object):
         Returns: desired vehicle 2D acceleration in the local frame [north, east]
         """
 
-        speed = np.linalg.norm(local_velocity_cmd)  # can we use this to limit the max velocity?
+        speed_cmd = np.linalg.norm(local_velocity_cmd)  # calculate the speed being commanded
+
+        if speed_cmd > self.max_speed:   # if the commanded speed is too high then reduce
+            local_velocity_cmd = local_velocity_cmd * self.max_speed/speed_cmd
 
         pos_err = local_position_cmd - local_position
-        vel_err = local_position_cmd - local_velocity
+        vel_err = local_velocity_cmd - local_velocity
 
         p_term_xy = self.xy_k_p * pos_err
         d_term_xy = self.xy_k_d * vel_err
-        
+
         accel_command = p_term_xy + d_term_xy + acceleration_ff
-        
+
         return accel_command
+
 
     
     def altitude_control(self, altitude_cmd, vertical_velocity_cmd, altitude, vertical_velocity, attitude, acceleration_ff=0.0):
@@ -142,17 +146,22 @@ class NonlinearController(object):
             
         Returns: thrust command for the vehicle (+up)
         """
-
+      
         z_err = altitude_cmd - altitude
         z_err_dot = vertical_velocity_cmd - vertical_velocity
+
         b_z = np.cos(attitude[0]) * np.cos(attitude[1]) # This is matrix element R33
 
         p_term = self.z_k_p * z_err
         d_term = self.z_k_d * z_err_dot
 
-        u_1_bar = p_term + d_term + acceleration_ff  # this term is desired vertical acceleration
+        total_velocity = p_term + vertical_velocity_cmd  # this is the new velocity after the thrust
 
-        c = (u_1_bar - GRAVITY)/b_z  # Note that gravity is a negative number
+        limited_velocity = np.clip(total_velocity, -self.max_descent_rate, self.max_ascent_rate)  # need to limit vertical velocity by ascent/decent rates
+
+        u_1 = (limited_velocity - vertical_velocity_cmd) + d_term + acceleration_ff  # this is the desired vertical acceleration
+
+        c = u_1 / b_z  # Note that you don't need to factor in gravity since the program sets the ff term to 9.81
 
         thrust = np.clip(c * DRONE_MASS_KG, 0.0, MAX_THRUST) # Limit thrust to values between 0 and Max Thrust
 
@@ -169,7 +178,29 @@ class NonlinearController(object):
             
         Returns: 2-element numpy array, desired rollrate (p) and pitchrate (q) commands in radians/s
         """
-        return np.array([0.0, 0.0])
+
+        R = euler2RM(attitude[0], attitude[1], attitude[2])
+        c_d = thrust_cmd/DRONE_MASS_KG
+
+        if thrust_cmd > 0.0:
+            target_R13 = -np.clip(acceleration_cmd[0].item()/c_d, -self.max_tilt, self.max_tilt) #-min(max(acceleration_cmd[0].item()/c_d, -self.max_tilt), self.max_tilt)
+            target_R23 = -np.clip(acceleration_cmd[1].item()/c_d, -self.max_tilt, self.max_tilt) #-min(max(acceleration_cmd[1].item()/c_d, -self.max_tilt), self.max_tilt)
+
+            p_cmd = (1/R[2, 2]) * \
+                    (-R[1, 0] * self.k_p_roll * (R[0, 2]-target_R13) + \
+                     R[0, 0] * self.k_p_pitch * (R[1, 2]-target_R23))
+
+            q_cmd = (1/R[2, 2]) * \
+                    (-R[1, 1] * self.k_p_roll * (R[0, 2]-target_R13) + \
+                     R[0, 1] * self.k_p_pitch * (R[1, 2]-target_R23))
+
+        else:  # Otherwise command no rate
+            print("negative thrust command")
+            p_cmd = 0.0
+            q_cmd = 0.0
+            thrust_cmd = 0.0
+
+        return np.array([p_cmd, q_cmd])
     
     def body_rate_control(self, body_rate_cmd, body_rate):
         """ Generate the roll, pitch, yaw moment commands in the body frame
@@ -180,7 +211,14 @@ class NonlinearController(object):
             
         Returns: 3-element numpy array, desired roll moment, pitch moment, and yaw moment commands in Newtons*meters
         """
-        return np.array([0.0, 0.0, 0.0])
+        k_p_rate = np.array([self.k_p_p, self.k_p_q, self.k_p_r])
+        rate_error = body_rate_cmd - body_rate
+        moment_cmd = MOI * np.multiply(k_p_rate, rate_error)
+
+        if np.linalg.norm(moment_cmd) > MAX_TORQUE:
+            moment_cmd = moment_cmd*MAX_TORQUE/np.linalg.norm(moment_cmd)
+
+        return moment_cmd
     
     def yaw_control(self, yaw_cmd, yaw):
         """ Generate the target yawrate
