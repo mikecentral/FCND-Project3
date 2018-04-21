@@ -31,8 +31,9 @@ class NonlinearController(object):
                 k_p_q = 20.0,
                 k_p_r = 5.0,
                 
-                max_tilt=1.0,
-                max_ascent_rate=5.0,
+                max_tilt_roll = 1.0,
+                max_tilt_pitch = 1.0,
+                max_ascent_rate = 5.0,
                 max_descent_rate=2.0,
                 max_speed=5.0
                 ):
@@ -51,7 +52,8 @@ class NonlinearController(object):
 
         self.max_ascent_rate = max_ascent_rate
         self.max_descent_rate = max_descent_rate
-        self.max_tilt = max_tilt
+        self.max_tilt_roll = max_tilt_roll
+        self.max_tilt_pitch = max_tilt_pitch
         self.max_speed = max_speed
 
 
@@ -180,31 +182,44 @@ class NonlinearController(object):
         """
 
         R = euler2RM(attitude[0], attitude[1], attitude[2])
-        c_d = thrust_cmd/DRONE_MASS_KG
+
+        R11 = R[0,0]
+        R12 = R[0,1]
+        R13 = R[0,2]
+        R21 = R[1,0]
+        R22 = R[1,1]
+        R23 = R[1,2]
+        R33 = R[2,2]
+
+        # From lesson 14.16 we know that x_dot_dot = c * R13 and y_dot_dot = c * R23 where c is thrust_cmd/mass
+        # R13 is -sin(pitch) and R23 is sin(roll)*cos(roll)
+
+        c = thrust_cmd/DRONE_MASS_KG
 
         if thrust_cmd > 0.0:
-            target_R13 = -np.clip(acceleration_cmd[0].item()/c_d, -self.max_tilt, self.max_tilt) #-min(max(acceleration_cmd[0].item()/c_d, -self.max_tilt), self.max_tilt)
-            target_R23 = -np.clip(acceleration_cmd[1].item()/c_d, -self.max_tilt, self.max_tilt) #-min(max(acceleration_cmd[1].item()/c_d, -self.max_tilt), self.max_tilt)
+            # limit the tilt angles using the max_tilt values
+            R13_cmd = -np.clip(acceleration_cmd[0]/c, -self.max_tilt_roll, self.max_tilt_roll)
+            R23_cmd = -np.clip(acceleration_cmd[1]/c, -self.max_tilt_pitch, self.max_tilt_pitch)
 
-            p_cmd = (1/R[2, 2]) * \
-                    (-R[1, 0] * self.k_p_roll * (R[0, 2]-target_R13) + \
-                     R[0, 0] * self.k_p_pitch * (R[1, 2]-target_R23))
+            # R13_cmd = -acceleration_cmd[0]/c
+            # R23_cmd = -acceleration_cmd[1]/c
 
-            q_cmd = (1/R[2, 2]) * \
-                    (-R[1, 1] * self.k_p_roll * (R[0, 2]-target_R13) + \
-                     R[0, 1] * self.k_p_pitch * (R[1, 2]-target_R23))
+            b_x_dot = self.k_p_roll  * (R13 - R13_cmd)
+            b_y_dot = self.k_p_pitch * (R23 - R23_cmd)
 
-        else:  # Otherwise command no rate
-            print("negative thrust command")
+            p_cmd = -(1/R33) * (R21 * b_x_dot - R11 * b_y_dot)
+
+            q_cmd = -(1/R33) * (R22 * b_x_dot - R12 * b_y_dot)
+
+        else:  # If thrust is negative or = 0 then set pitch and roll rates to zero
+
             p_cmd = 0.0
             q_cmd = 0.0
-            thrust_cmd = 0.0
 
         return np.array([p_cmd, q_cmd])
     
     def body_rate_control(self, body_rate_cmd, body_rate):
         """ Generate the roll, pitch, yaw moment commands in the body frame
-        
         Args:
             body_rate_cmd: 3-element numpy array (p_cmd,q_cmd,r_cmd) in radians/second^2
             body_rate: 3-element numpy array (p,q,r) in radians/second^2
@@ -212,13 +227,14 @@ class NonlinearController(object):
         Returns: 3-element numpy array, desired roll moment, pitch moment, and yaw moment commands in Newtons*meters
         """
         k_p_rate = np.array([self.k_p_p, self.k_p_q, self.k_p_r])
-        rate_error = body_rate_cmd - body_rate
-        moment_cmd = MOI * np.multiply(k_p_rate, rate_error)
+        rate_err = body_rate_cmd - body_rate
+        moments_cmd = MOI * np.multiply(k_p_rate, rate_err)
 
-        if np.linalg.norm(moment_cmd) > MAX_TORQUE:
-            moment_cmd = moment_cmd*MAX_TORQUE/np.linalg.norm(moment_cmd)
+        # Limit the moments to the Max Torque value
+        if np.linalg.norm(moments_cmd) > MAX_TORQUE:
+            moments_cmd = moments_cmd*MAX_TORQUE/np.linalg.norm(moments_cmd)
 
-        return moment_cmd
+        return moments_cmd
     
     def yaw_control(self, yaw_cmd, yaw):
         """ Generate the target yawrate

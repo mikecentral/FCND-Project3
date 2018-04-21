@@ -121,8 +121,8 @@ class ControlsFlyer(UnityDrone):
 
     def velocity_callback(self):
         if self.flight_state == States.LANDING:
-            if self.global_position[2] - self.global_home[2] < 0.1:
-                if abs(self.local_position[2]) < 0.01:
+            if abs(self.global_position[2] - self.global_home[2]) < 0.1:
+                if abs(self.local_position[2]) < 0.1:
                     self.disarming_transition()
         if self.flight_state == States.WAYPOINT:
             self.position_controller()
