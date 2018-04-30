@@ -155,13 +155,13 @@ class NonlinearController(object):
         b_z = np.cos(attitude[0]) * np.cos(attitude[1]) # This is matrix element R33
 
         p_term = self.z_k_p * z_err
-        d_term = self.z_k_d * z_err_dot
+        d_term = self.z_k_d * z_err_dot + vertical_velocity_cmd  # added the second term for ff
 
-        total_velocity = p_term + vertical_velocity_cmd  # this is the new velocity after the thrust
+        # total_velocity = p_term + vertical_velocity_cmd  # this is the new velocity after the thrust
 
-        limited_velocity = np.clip(total_velocity, -self.max_descent_rate, self.max_ascent_rate)  # need to limit vertical velocity by ascent/decent rates
+        # limited_velocity = np.clip(total_velocity, -self.max_descent_rate, self.max_ascent_rate)  # need to limit vertical velocity by ascent/decent rates
 
-        u_1 = (limited_velocity - vertical_velocity_cmd) + d_term + acceleration_ff  # this is the desired vertical acceleration
+        u_1 = p_term + d_term + acceleration_ff  # this is the desired vertical acceleration
 
         c = u_1 / b_z  # Note that you don't need to factor in gravity since the program sets the ff term to 9.81
 
@@ -192,24 +192,21 @@ class NonlinearController(object):
         R33 = R[2,2]
 
         # From lesson 14.16 we know that x_dot_dot = c * R13 and y_dot_dot = c * R23 where c is thrust_cmd/mass
-        # R13 is -sin(pitch) and R23 is sin(roll)*cos(roll)
+        # R13 is -sin(pitch) and R23 is sin(roll)*cos(pitch)
 
-        c = thrust_cmd/DRONE_MASS_KG
+        c = -thrust_cmd/DRONE_MASS_KG
 
         if thrust_cmd > 0.0:
             # limit the tilt angles using the max_tilt values
-            R13_cmd = -np.clip(acceleration_cmd[0]/c, -self.max_tilt_roll, self.max_tilt_roll)
-            R23_cmd = -np.clip(acceleration_cmd[1]/c, -self.max_tilt_pitch, self.max_tilt_pitch)
+            R13_cmd = np.clip(acceleration_cmd[0]/c, -self.max_tilt_roll, self.max_tilt_roll)
+            R23_cmd = np.clip(acceleration_cmd[1]/c, -self.max_tilt_pitch, self.max_tilt_pitch)
 
-            # R13_cmd = -acceleration_cmd[0]/c
-            # R23_cmd = -acceleration_cmd[1]/c
+            b_x_dot = self.k_p_roll  * (R13_cmd - R13)
+            b_y_dot = self.k_p_pitch * (R23_cmd - R23)
 
-            b_x_dot = self.k_p_roll  * (R13 - R13_cmd)
-            b_y_dot = self.k_p_pitch * (R23 - R23_cmd)
+            p_cmd = (1/R33) * (R21 * b_x_dot - R11 * b_y_dot)
 
-            p_cmd = -(1/R33) * (R21 * b_x_dot - R11 * b_y_dot)
-
-            q_cmd = -(1/R33) * (R22 * b_x_dot - R12 * b_y_dot)
+            q_cmd = (1/R33) * (R22 * b_x_dot - R12 * b_y_dot)
 
         else:  # If thrust is negative or = 0 then set pitch and roll rates to zero
 
